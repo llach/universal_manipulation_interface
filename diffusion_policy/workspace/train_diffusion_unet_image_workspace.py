@@ -115,6 +115,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         # compute normalizer on the main process and save to disk
         normalizer_path = os.path.join(self.output_dir, 'normalizer.pkl')
         if accelerator.is_main_process:
+            print("WAHHHH")
             normalizer = dataset.get_normalizer()
             pickle.dump(normalizer, open(normalizer_path, 'wb'))
 

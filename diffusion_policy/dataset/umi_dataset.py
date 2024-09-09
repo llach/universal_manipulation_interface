@@ -228,6 +228,7 @@ class UmiDataset(BaseDataset):
 
         # obs
         for key in self.lowdim_keys:
+            print(key)
             stat = array_to_stats(data_cache[key])
 
             if key.endswith('pos') or 'pos_wrt' in key:
