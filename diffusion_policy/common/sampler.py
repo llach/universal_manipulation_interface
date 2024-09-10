@@ -35,7 +35,7 @@ class SequenceSampler:
         episode_ends = replay_buffer.episode_ends[:]
 
         # load gripper_width
-        gripper_width = replay_buffer['robot0_gripper_width'][:, 0]
+        gripper_width = 0.075#replay_buffer['robot0_gripper_width'][:, 0]
         gripper_width_threshold = 0.08
         self.repeat_frame_prob = repeat_frame_prob
 
@@ -53,8 +53,6 @@ class SequenceSampler:
             for current_idx in range(start_idx, end_idx):
                 if not action_padding and end_idx < current_idx + (key_horizon['action'] - 1) * key_down_sample_steps['action'] + 1:
                     continue
-                if gripper_width[current_idx] < gripper_width_threshold:
-                    before_first_grasp = False
                 indices.append((current_idx, start_idx, end_idx, before_first_grasp))
         
         # load low_dim to memory and keep rgb as compressed zarr array
@@ -96,7 +94,7 @@ class SequenceSampler:
             # construct action (concatenation of [eef_pos, eef_rot, gripper_width])
             actions = list()
             for robot_idx in range(self.num_robot):
-                for cat in ['eef_pos', 'eef_rot_axis_angle', 'gripper_width']:
+                for cat in ['eef_pos', 'eef_rot_axis_angle', 'gripper_open']:
                     key = f'robot{robot_idx}_{cat}'
                     if key in self.replay_buffer:
                         actions.append(self.replay_buffer[key])

@@ -15,7 +15,7 @@ shape_meta: &shape_meta
   # acceptable types: rgb, low_dim
   obs:
     camera0_rgb:
-      shape: [3, 224, 224]
+      shape: [3, 224, 299]
       horizon: ${task.img_obs_horizon} # int
       latency_steps: 0 # float
       down_sample_steps: ${task.obs_down_sample_steps} # int
@@ -69,7 +69,7 @@ env_runner:
   _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
 
 dataset:
-  _target_: diffusion_policy.dataset.umi_dataset.UmiDataset
+  _target_: diffusion_policy.dataset.unstack_dataset.UnstackDataset
   shape_meta: *shape_meta
   dataset_path: ${task.dataset_path}
   cache_dir: null

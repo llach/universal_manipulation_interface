@@ -27,6 +27,7 @@ from umi.common.cv_util import (
     inpaint_tag,
     get_mirror_crop_slices
 )
+import scipy.spatial.transform as st
 from diffusion_policy.common.replay_buffer import ReplayBuffer
 from diffusion_policy.codecs.imagecodecs_numcodecs import register_codecs, JpegXl
 register_codecs()
@@ -103,7 +104,7 @@ def main(in_path, output, out_res, compression_level, num_workers):
         eef_rot = np.array([g[3] for g in gripper_data])
 
         episode_data[robot_name + '_eef_pos'] = eef_pos.astype(np.float32)
-        episode_data[robot_name + '_eef_rot_axis_angle'] = eef_rot.astype(np.float32)
+        episode_data[robot_name + '_eef_rot_axis_angle'] = st.Rotation.from_quat(eef_rot).as_rotvec().astype(np.float32)
         episode_data[robot_name + '_gripper_open'] = np.expand_dims(np.array([g[0] for g in gripper_data])<gripper_close, axis=-1).astype(np.uint8)
 
         out_replay_buffer.add_episode(data=episode_data, compressors=None)
