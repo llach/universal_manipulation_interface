@@ -32,6 +32,13 @@ from diffusion_policy.common.replay_buffer import ReplayBuffer
 from diffusion_policy.codecs.imagecodecs_numcodecs import register_codecs, JpegXl
 register_codecs()
 
+required_files = [
+    "rgb.mp4",
+    "depth.mp4",
+    "rgb_stamps.json",
+    "logged_stamps.json",
+    "gripper_poses.json"
+]
 
 datefmt = "%Y.%m.%d_%H_%M_%S"
 
@@ -73,6 +80,11 @@ def main(in_path, output, out_res, compression_level, num_workers):
         print(path)
         if path.is_file(): continue
 
+        # check whether all necessary files exist
+        if (not np.all([path.joinpath(fn).is_file() for fn in required_files])):
+            print(path, "is missing data")
+            continue
+
         with open(path.joinpath("rgb_stamps.json"), "r") as f:
             rgb_stamps = np.array(json.load(f))
 
@@ -83,6 +95,10 @@ def main(in_path, output, out_res, compression_level, num_workers):
             gripper_poses = json.load(f)
 
         # select timestamp where placing begins and where gripper closes
+        if len(logged_stamps) == 0:
+            print(path, "doesn't have enough stamps")
+            continue
+
         grasping_end = [ls[0] for ls in logged_stamps if ls[1] == "placing"][0]
         gripper_close = [ls[0] for ls in logged_stamps if ls[1] == "gripper"][0]
 
