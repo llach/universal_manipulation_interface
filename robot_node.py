@@ -52,6 +52,7 @@ class PolicyNode(Node):
         self.declare_parameter('source_frame', 'tool0')
         self.declare_parameter('max_start_pose_attempts', 10)
         self.declare_parameter('start_pose_wait_duration', 1.0)  # seconds
+        self.declare_parameter('gripper_state_topic', '/gripper_state')  # Added for gripper state
 
         # Get parameters
         self.image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
@@ -63,6 +64,7 @@ class PolicyNode(Node):
         self.source_frame = self.get_parameter('source_frame').get_parameter_value().string_value
         self.max_start_pose_attempts = self.get_parameter('max_start_pose_attempts').get_parameter_value().integer_value
         self.start_pose_wait_duration = self.get_parameter('start_pose_wait_duration').get_parameter_value().double_value
+        self.gripper_state_topic = self.get_parameter('gripper_state_topic').get_parameter_value().string_value
 
         # Initialize variables
         self.bridge = CvBridge()
@@ -90,6 +92,14 @@ class PolicyNode(Node):
             1  # Queue size of 1 to limit buffering
         )
 
+        # Subscribe to gripper state topic
+        self.gripper_state_sub = self.create_subscription(
+            Bool,
+            self.gripper_state_topic,
+            self.gripper_state_callback,
+            10  # Queue size
+        )
+
         # Publishers
         self.pose_pub = self.create_publisher(PoseStamped, 'desired_pose', 10)
         self.gripper_pub = self.create_publisher(Bool, 'gripper_command', 10)
@@ -105,7 +115,7 @@ class PolicyNode(Node):
         self.processing_thread.daemon = True
         self.processing_thread.start()
 
-        self.get_logger().info(f"Policy node initialized. Subscribed to {self.image_topic}")
+        self.get_logger().info(f"Policy node initialized. Subscribed to {self.image_topic} and {self.gripper_state_topic}")
 
     def configure_logging(self):
         """
@@ -221,7 +231,6 @@ class PolicyNode(Node):
                 self.get_logger().debug(f"Start robot0_eef_rot_axis_angle: {eef_rot_axis_angle}")
 
                 # Initialize buffers with the start pose duplicated
-                # For camera_buffer, we'll initialize with two zero tensors
                 for _ in range(2):
                     # Initialize camera_buffer with zero tensors of expected size
                     self.camera_buffer.append(torch.zeros((self.desired_channels, self.desired_height, self.desired_width), dtype=torch.float32))
@@ -311,6 +320,12 @@ class PolicyNode(Node):
                 self.get_logger().error(f"CvBridge Error: {e}")
                 return
 
+    def gripper_state_callback(self, msg):
+        with self.lock:
+            gripper_state = 1.0 if msg.data else 0.0
+            self.robot0_gripper_open_buffer.append(gripper_state)
+            self.get_logger().debug(f"Gripper state updated: {gripper_state}")
+
     def processing_loop(self):
         # Wait until the start pose is ready
         if not self.start_pose_ready.wait(timeout=self.max_start_pose_attempts * self.start_pose_wait_duration + 1.0):
@@ -334,10 +349,6 @@ class PolicyNode(Node):
                         'robot0_eef_rot_axis_angle_wrt_start': torch.tensor(list(self.robot0_eef_rot_axis_angle_wrt_start_buffer), dtype=torch.float32).unsqueeze(0).to(self.device),  # [1, 2, 6]
                         'robot0_gripper_open': torch.tensor(list(self.robot0_gripper_open_buffer), dtype=torch.float32).unsqueeze(0).unsqueeze(-1).to(self.device)  # [1, 2, 1]
                     }
-
-                    # self.get_logger().debug(f"Observation Dictionary:")
-                    # for key, value in obs_dict.items():
-                    #     self.get_logger().debug(f"  {key}: shape={value.shape}, data={value}")
 
                 else:
                     # Not enough data to process
@@ -384,19 +395,45 @@ class PolicyNode(Node):
         # Convert rotation matrix to rotation vector (axis-angle)
         rotvec = st.Rotation.from_matrix(rot_mat).as_rotvec()
 
-        # Depending on the action_pose_repr, convert to absolute pose
-        if self.action_pose_repr == 'delta':
-            # Apply delta to current pose
-            # For simplicity, assuming current pose is zero
+        # Determine action pose representation based on the first three letters
+        action_repr = self.action_pose_repr.lower()
+        if action_repr.startswith('abs'):
+            # Absolute: use policy output as-is
             new_pos = pos
             new_rotvec = rotvec
-        elif self.action_pose_repr == 'absolute':
-            new_pos = pos
-            new_rotvec = rotvec
+            self.get_logger().debug("Action Pose Representation: Absolute")
+        elif action_repr.startswith('rel'):
+            # Relative: add policy output to the start pose
+            start_pos = self.start_pose_mat[:3, 3]
+            start_rot_mat = self.start_pose_mat[:3, :3]
+            start_rot = st.Rotation.from_matrix(start_rot_mat)
+            start_rotvec = start_rot.as_rotvec()
+
+            new_pos = start_pos + pos
+            new_rotvec = start_rotvec + rotvec
+            self.get_logger().debug("Action Pose Representation: Relative")
+        elif action_repr.startswith('del'):
+            # Delta: add policy output to the current pose
+            # Assume current pose is the last entry in the robot0_eef_pos_buffer and robot0_eef_rot_axis_angle_buffer
+            if len(self.robot0_eef_pos_buffer) == 0 or len(self.robot0_eef_rot_axis_angle_buffer) == 0:
+                self.get_logger().error("Insufficient data in buffers to apply delta.")
+                new_pos = pos
+                new_rotvec = rotvec
+            else:
+                current_pos = self.robot0_eef_pos_buffer[-1]
+                current_rot6d = self.robot0_eef_rot_axis_angle_buffer[-1]
+                current_rot_mat = rot6d_to_mat(current_rot6d)
+                current_rot = st.Rotation.from_matrix(current_rot_mat)
+                current_rotvec = current_rot.as_rotvec()
+
+                new_pos = current_pos + pos
+                new_rotvec = current_rotvec + rotvec
+                self.get_logger().debug("Action Pose Representation: Delta")
         else:
-            # Handle other representations if needed
+            # Default to absolute if representation is unrecognized
             new_pos = pos
             new_rotvec = rotvec
+            self.get_logger().warn(f"Unrecognized action_pose_repr '{self.action_pose_repr}'. Defaulting to Absolute.")
 
         # Prepare action prediction
         action_pred = {
@@ -465,14 +502,15 @@ class PolicyNode(Node):
 
     def create_debug_image(self, debug_info):
         # Overlay the policy outputs on the latest camera image for better visualization
-        if len(self.camera_buffer) > 0:
-            latest_camera_tensor = self.camera_buffer[-1].cpu().numpy()  # [3, 224, 299]
-            # Convert tensor to image format
-            latest_camera_image = np.transpose(latest_camera_tensor, (1, 2, 0))  # [224, 299, 3]
-            latest_camera_image = (latest_camera_image * 255).astype(np.uint8)
-        else:
-            # Create a blank image if no camera data is available
-            latest_camera_image = np.zeros((self.desired_height, self.desired_width, 3), dtype=np.uint8)
+        with self.lock:
+            if len(self.camera_buffer) > 0:
+                latest_camera_tensor = self.camera_buffer[-1].cpu().numpy()  # [3, 224, 299]
+                # Convert tensor to image format
+                latest_camera_image = np.transpose(latest_camera_tensor, (1, 2, 0))  # [224, 299, 3]
+                latest_camera_image = (latest_camera_image * 255).astype(np.uint8)
+            else:
+                # Create a blank image if no camera data is available
+                latest_camera_image = np.zeros((self.desired_height, self.desired_width, 3), dtype=np.uint8)
 
         # Overlay the policy outputs on the frame
         delta_pos_cm = debug_info['delta_pos_cm']
