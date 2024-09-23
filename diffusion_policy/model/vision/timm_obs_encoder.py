@@ -261,6 +261,7 @@ class TimmObsEncoder(ModuleAttrMixin):
             img = obs_dict[key]
             B, T = img.shape[:2]
             assert B == batch_size
+            # print(img.shape[2:], self.key_shape_map[key])
             assert img.shape[2:] == self.key_shape_map[key]
             img = img.reshape(B*T, *img.shape[2:])
             img = self.key_transform_map[key](img)
@@ -274,6 +275,7 @@ class TimmObsEncoder(ModuleAttrMixin):
             data = obs_dict[key]
             B, T = data.shape[:2]
             assert B == batch_size
+            # print(key, data.shape[2:], self.key_shape_map[key], data, data.shape)
             assert data.shape[2:] == self.key_shape_map[key]
             features.append(data.reshape(B, -1))
         

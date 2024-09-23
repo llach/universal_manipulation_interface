@@ -103,7 +103,7 @@ class PolicyNode(Node):
         # Publishers
         self.pose_pub = self.create_publisher(PoseStamped, 'desired_pose', 10)
         self.gripper_pub = self.create_publisher(Bool, 'gripper_command', 10)
-        self.debug_image_pub = self.create_publisher(CompressedImage, 'debug_image_compressed', 10)  # Changed to CompressedImage
+        self.debug_image_pub = self.create_publisher(CompressedImage, 'debug_image/compressed', 10)  # Changed to CompressedImage
 
         # Start the start pose retrieval thread
         self.start_pose_thread = Thread(target=self.get_start_pose_thread)
@@ -125,7 +125,7 @@ class PolicyNode(Node):
         logging.getLogger().setLevel(logging.INFO)
 
         # Step 1.2: Set this node's logger to DEBUG
-        self.get_logger().set_level(rclpy.logging.LoggingSeverity.INFO)
+        self.get_logger().set_level(rclpy.logging.LoggingSeverity.DEBUG)
 
         # Step 1.3: (Optional) Reduce the verbosity of external libraries if necessary
         # Example: Suppress debug logs from 'torch' and 'hydra'
@@ -501,35 +501,62 @@ class PolicyNode(Node):
             self.get_logger().error(f"CvBridge Error while publishing debug image: {e}")
 
     def create_debug_image(self, debug_info):
-        # Overlay the policy outputs on the latest camera image for better visualization
+        """
+        Creates a debug image by overlaying the desired changes in EEF pose
+        relative to the current pose onto the latest camera image.
+
+        Args:
+            debug_info (dict): Contains 'delta_pos_cm', 'delta_rot_rpy',
+                            'gripper_open_raw', and 'gripper_open_transformed' keys.
+
+        Returns:
+            numpy.ndarray: The debug image with overlaid information.
+        """
         with self.lock:
             if len(self.camera_buffer) > 0:
-                latest_camera_tensor = self.camera_buffer[-1].cpu().numpy()  # [3, 224, 299]
-                # Convert tensor to image format
-                latest_camera_image = np.transpose(latest_camera_tensor, (1, 2, 0))  # [224, 299, 3]
+                # Retrieve the latest camera image tensor
+                latest_camera_tensor = self.camera_buffer[-1].cpu().numpy()  # Shape: [3, H, W]
+                # Convert tensor to image format [H, W, 3]
+                latest_camera_image = np.transpose(latest_camera_tensor, (1, 2, 0))
+                # Convert from [0,1] to [0,255] and uint8
                 latest_camera_image = (latest_camera_image * 255).astype(np.uint8)
             else:
                 # Create a blank image if no camera data is available
                 latest_camera_image = np.zeros((self.desired_height, self.desired_width, 3), dtype=np.uint8)
 
-        # Overlay the policy outputs on the frame
-        delta_pos_cm = debug_info['delta_pos_cm']
-        delta_rot_rpy = debug_info['delta_rot_rpy']
-        gripper_open_raw = debug_info['gripper_open_raw']
-        gripper_open_transformed = debug_info['gripper_open_transformed']
+        # Extract debug information
+        delta_pos_cm = debug_info['delta_pos_cm']            # [X, Y, Z] in cm
+        delta_rot_rpy = debug_info['delta_rot_rpy']          # [Roll, Pitch, Yaw] in degrees
+        gripper_open_raw = debug_info['gripper_open_raw']    # Raw gripper value
+        gripper_open_transformed = debug_info['gripper_open_transformed']  # Boolean gripper state
 
-        # Prepare text lines
-        line1 = f'Delta Pos (cm): X={delta_pos_cm[0]:.2f}, Y={delta_pos_cm[1]:.2f}, Z={delta_pos_cm[2]:.2f}'
-        line2 = f'Delta Rot (deg): Roll={delta_rot_rpy[0]:.2f}, Pitch={delta_rot_rpy[1]:.2f}, Yaw={delta_rot_rpy[2]:.2f}'
-        line3 = f'Gripper Open Raw: {gripper_open_raw:.4f}'
-        line4 = f'Gripper Open Transformed: {gripper_open_transformed}'
+        # Prepare text lines for overlay
+        lines = [
+            f"Position Change (cm):",
+            f"  X: {delta_pos_cm[0]:.2f}",
+            f"  Y: {delta_pos_cm[1]:.2f}",
+            f"  Z: {delta_pos_cm[2]:.2f}",
+            f"Rotation Change (deg):",
+            f"  Roll: {delta_rot_rpy[0]:.2f}",
+            f"  Pitch: {delta_rot_rpy[1]:.2f}",
+            f"  Yaw: {delta_rot_rpy[2]:.2f}",
+            f"Gripper State:",
+            f"  Raw Value: {gripper_open_raw:.2f}",
+            f"  Transformed: {'Open' if gripper_open_transformed else 'Closed'}"
+        ]
 
-        # Overlay text on the frame
-        y0, dy = 30, 30
-        for i, line in enumerate([line1, line2, line3, line4]):
-            y = y0 + i * dy
-            cv2.putText(latest_camera_image, line, (10, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        # Define text properties
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        color = (0, 255, 0)  # Green color in BGR
+        thickness = 1
+        x, y_start = 10, 30
+        line_spacing = 20
+
+        # Overlay each line of text onto the image
+        for i, line in enumerate(lines):
+            y = y_start + i * line_spacing
+            cv2.putText(latest_camera_image, line, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
 
         return latest_camera_image
 
