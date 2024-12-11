@@ -121,6 +121,9 @@ def main(data_dirs, checkpoint, output, video_output, display):
             obs_dict = dict_apply(
                 obs_dict_np, lambda x: torch.from_numpy(x).unsqueeze(0).to(device)
             )
+            for k, v in obs_dict.items():
+                print(k, v.shape)
+
             # Run the policy to get action prediction
             with torch.no_grad():
                 result = policy.predict_action(obs_dict)
