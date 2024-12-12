@@ -8,46 +8,9 @@ import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
 
+from helper import interpolate_gripper_positions
+
 in_path = f"{os.environ['HOME']}/repos/unstack_cloud/"
-
-import numpy as np
-
-def interpolate_gripper_positions(rgb_stamps, gripper_stamps, gripper_positions):
-    interpolated_positions = []
-
-    for rgb_time in rgb_stamps:
-        # Find the index of the gripper timestamp just before the rgb_time
-        before_index = np.where(gripper_stamps < rgb_time)[0]
-        if len(before_index) == 0:
-            before_index = 0
-        else:
-            before_index = before_index[-1]
-
-        # Find the index of the gripper timestamp just after the rgb_time
-        after_index = np.where(gripper_stamps > rgb_time)[0]
-        if len(after_index) == 0:
-            after_index = len(gripper_stamps) - 1
-        else:
-            after_index = after_index[0]
-
-        # Get the timestamps and positions before and after
-        time_before = gripper_stamps[before_index]
-        time_after = gripper_stamps[after_index]
-        # print(before_index, after_index)
-        position_before = gripper_positions[before_index]
-        position_after = gripper_positions[after_index]
-
-        # Perform linear interpolation
-        if time_after == time_before:  # Avoid division by zero
-            interpolated_position = position_before
-        else:
-            interpolated_position = position_before + (
-                (rgb_time - time_before) / (time_after - time_before)
-            ) * (position_after - position_before)
-
-        interpolated_positions.append(interpolated_position)
-
-    return np.array(interpolated_positions)
 
 
 # shapes: Nepisodes x Ntimesteps of episode x ...
@@ -62,7 +25,7 @@ stamps = []
 for i, ipath in enumerate(os.listdir(in_path)):
         path = pathlib.Path(os.path.join(in_path, ipath)).absolute() 
         if path.is_file(): continue
-        print(path)
+        print("Processing ", path)
 
         gripper_poses = path.joinpath("gripper_poses.json")
         if not gripper_poses.is_file():
@@ -84,7 +47,6 @@ for i, ipath in enumerate(os.listdir(in_path)):
 
         with open(misc_data, "r") as f:
             misc = json.load(f)
-            pass
             gripper_close = misc["gripper_close_time"]
         
         with open(gripper_poses, "r") as f:

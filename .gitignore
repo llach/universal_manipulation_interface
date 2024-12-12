@@ -1,3 +1,4 @@
+*.zarr
 *.mp4
 *.ckpt
 unstack_dataset.zarr
