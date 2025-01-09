@@ -1,4 +1,5 @@
 import os
+import json
 import pathlib
 import click
 import torch
@@ -21,15 +22,15 @@ from umi.common.pose_util import (
 )
 
 # Import the shared data processing methods
-from data_processing import process_data_directories
+from unstack.data_processing import process_data_directories
 
 @click.command()
-@click.argument('data_dirs', nargs=-1)
+@click.argument('episode_dirs', nargs=-1)
 @click.option('--checkpoint', '-c', required=True, help='Path to checkpoint (.ckpt file)')
 @click.option('--output', '-o', default=None, help='Output file to save errors (optional)')
 @click.option('--video_output', '-vo', default='output_video.mp4', help='Output video file path')
 @click.option('--display', is_flag=True, help='Display frames live during processing')
-def main(data_dirs, checkpoint, output, video_output, display):
+def main(episode_dirs, checkpoint, output, video_output, display):
     # Load the checkpoint
     ckpt_path = checkpoint
     if not ckpt_path.endswith('.ckpt'):
@@ -51,13 +52,13 @@ def main(data_dirs, checkpoint, output, video_output, display):
     policy = workspace.model
     if cfg.training.use_ema:
         policy = workspace.ema_model
-    policy.num_inference_steps = 16  # Adjust as needed
+    policy.num_inference_steps = 2  # Adjust as needed
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     policy.eval().to(device)
 
     # Process data directories to get episodes_info
-    episodes_info = process_data_directories(data_dirs)
-    if not episodes_info:
+    episode_infos = process_data_directories(episode_dirs)
+    if not episode_infos:
         print("No valid episodes found.")
         return
 
@@ -78,8 +79,10 @@ def main(data_dirs, checkpoint, output, video_output, display):
     # Initialize video writer
     video_writer = None
 
+    actions_gt, actions_pred = [], []
+
     # Iterate over each episode
-    for episode_idx, episode_info in enumerate(tqdm(episodes_info, desc='Episodes')):
+    for episode_idx, episode_info in enumerate(tqdm(episode_infos, desc='Episodes')):
         episode_data = episode_info['episode_data']
         num_steps = episode_data[f'{robot_name}_eef_pos'].shape[0]
         video_path = episode_info['video_path']
@@ -115,14 +118,12 @@ def main(data_dirs, checkpoint, output, video_output, display):
         for step_idx in range(num_steps):
             # Construct observation dictionary
             obs_dict_np = construct_observation_dict(
-                episode_data, frames, step_idx, shape_meta, robot_name, camera_name, start_pose_mat
+                episode_data, frames, step_idx, shape_meta, robot_name, start_pose_mat
             )
-            # Convert observations to tensors and move to device
+            # Convert observations to tensors, add batch dimensions and move to device
             obs_dict = dict_apply(
                 obs_dict_np, lambda x: torch.from_numpy(x).unsqueeze(0).to(device)
             )
-            for k, v in obs_dict.items():
-                print(k, v.shape)
 
             # Run the policy to get action prediction
             with torch.no_grad():
@@ -137,6 +138,10 @@ def main(data_dirs, checkpoint, output, video_output, display):
             action_gt = get_ground_truth_action(
                 episode_data, step_idx, num_steps, robot_name
             )
+            
+            actions_gt.append(action_gt)
+            actions_pred.append(action_pred)
+
             # Compute errors
             pos_error = np.linalg.norm(action_pred[:3] - action_gt[:3])
             rot_error = rotation_error(action_pred[3:6], action_gt[3:6])
@@ -151,14 +156,14 @@ def main(data_dirs, checkpoint, output, video_output, display):
             gripper_errors.append(gripper_error)
 
             # Print errors for the current frame
-            print(f'Episode {episode_idx}, Step {step_idx}, Pos Error: {pos_error:.4f}, Rot Error: {rot_error:.4f}, Gripper Error: {gripper_error}')
+            print(f'Episode {episode_idx}, Step {step_idx}, Pos Error: {pos_error:.4f}m, Rot Error: {rot_error:.4f}°, Gripper Error: {gripper_error}')
 
             # Visualize and save frame with overlay
             frame = frames[step_idx].copy()
             # Overlay text showing the prediction errors
             line1 = f'Episode: {episode_idx}, Step: {step_idx}'
-            line2 = f'Pos Error: {pos_error:.4f}'
-            line3 = f'Rot Error: {rot_error:.4f}'
+            line2 = f'Pos Error: {pos_error:.4f}m'
+            line3 = f'Rot Error: {rot_error:.4f}°'
             line4 = f'Gripper Error: {gripper_error}'
             # Position the text lines
             y0, dy = 30, 30
@@ -175,10 +180,13 @@ def main(data_dirs, checkpoint, output, video_output, display):
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     print("Exiting due to user input.")
                     break  # Exit the loop if 'q' is pressed
-
+        
         else:
             continue  # Continue if the inner loop wasn't broken
         break  # Break the outer loop if 'q' was pressed in inner loop
+
+    with open("actions.json", "w", encoding="utf8") as f:
+        json.dump(np.array([actions_gt, actions_pred], dtype=np.float32).tolist(), f)
 
     # Release the video writer
     if video_writer is not None:
@@ -206,7 +214,7 @@ def main(data_dirs, checkpoint, output, video_output, display):
         np.savez(output, pos_errors=np.array(pos_errors), rot_errors=np.array(rot_errors), gripper_errors=np.array(gripper_errors))
         print(f'Errors saved to {output}')
 
-def construct_observation_dict(episode_data, frames, step_idx, shape_meta, robot_name, camera_name, start_pose_mat):
+def construct_observation_dict(episode_data, frames, step_idx, shape_meta, robot_name, start_pose_mat):
     """
     Constructs the observation dictionary from the episode data at the given step index.
     """
@@ -214,116 +222,66 @@ def construct_observation_dict(episode_data, frames, step_idx, shape_meta, robot
     for key in shape_meta.obs:
         meta = shape_meta.obs[key]
         horizon = meta.horizon
-        # Handle horizon
-        if horizon == 1:
-            # Get the data at step_idx
-            if key == f'{camera_name}_rgb':
-                # Get the image frame
-                img = frames[step_idx]
-                # Preprocess image if necessary (e.g., resize, normalize)
-                img = img.astype(np.float32) / 255.0  # Normalize to [0,1]
-                # Convert to (Channels, Height, Width)
-                img = np.transpose(img, (2, 0, 1))
-                obs_dict[key] = img
-            elif key in episode_data:
-                data = episode_data[key][step_idx]
-                # Check if the key contains '_rot_axis_angle'
-                if '_rot_axis_angle' in key:
-                    # Convert axis-angle to 6D rotation representation
-                    rotvec = data
-                    rot_mat = st.Rotation.from_rotvec(rotvec).as_matrix()
-                    rot6d = mat_to_rot6d(rot_mat)
-                    obs_dict[key] = rot6d
-                else:
-                    obs_dict[key] = data
-            elif key == f'{robot_name}_eef_pos_wrt_start' or key == f'{robot_name}_eef_rot_axis_angle_wrt_start':
-                # Compute pose relative to start pose
-                curr_pos = episode_data[f'{robot_name}_eef_pos'][step_idx]
-                curr_rotvec = episode_data[f'{robot_name}_eef_rot_axis_angle'][step_idx]
-                curr_pose = np.concatenate([curr_pos, curr_rotvec], axis=-1)
-                curr_pose_mat = pose_to_mat(curr_pose)
-                rel_pose_mat = convert_pose_mat_rep(
-                    curr_pose_mat,
-                    base_pose_mat=start_pose_mat,
-                    pose_rep='relative',
-                    backward=False
-                )
-                rel_pose = mat_to_pose(rel_pose_mat)
-                if key == f'{robot_name}_eef_pos_wrt_start':
-                    obs_dict[key] = rel_pose[:3]
-                else:  # key == f'{robot_name}_eef_rot_axis_angle_wrt_start'
-                    # Convert rotation to 6D representation
-                    rotvec = rel_pose[3:]
-                    rot_mat = st.Rotation.from_rotvec(rotvec).as_matrix()
-                    rot6d = mat_to_rot6d(rot_mat)
-                    obs_dict[key] = rot6d
+
+        # Handle horizons greater than 1
+        start_idx = step_idx
+        end_idx = step_idx + horizon
+        if "rgb" in key:
+            # move channel last to channel first
+            # T,H,W,C -> T,C,H,W
+            # convert uint8 image to float32
+            imgs = np.moveaxis(frames[start_idx:end_idx], -1, 1).astype(np.float32) / 255.
+
+            # solve padding
+            if imgs.shape[0] < horizon:
+                padding = np.repeat(imgs[:1], horizon - imgs.shape[0], axis=0)
+                imgs = np.concatenate([padding, imgs], axis=0)
+
+            obs_dict[key] = imgs
+            # obs_dict[key] = np.random.uniform(0,1,imgs.shape) # test with random noise as images
+        elif key in episode_data:
+            data = episode_data[key][start_idx:end_idx]
+            # Pad if necessary
+            if data.shape[0] < horizon:
+                padding = np.repeat(data[:1], horizon - data.shape[0], axis=0)
+                data = np.concatenate([padding, data], axis=0)
+            # Check if the key contains '_rot_axis_angle'
+            if '_rot_axis_angle' in key:
+                # Convert axis-angle to 6D rotation representation
+                rotvec = data
+                rot_mats = st.Rotation.from_rotvec(rotvec).as_matrix()
+                rot6d = mat_to_rot6d(rot_mats)
+                obs_dict[key] = rot6d
             else:
-                # Handle other cases as needed
-                pass
-        else:
-            # Handle horizons greater than 1
-            start_idx = max(0, step_idx - horizon + 1)
-            end_idx = step_idx + 1
-            if key == f'{camera_name}_rgb':
-                # Get the image frames
-                imgs = frames[start_idx:end_idx]
-                # Pad if necessary
-                if len(imgs) < horizon:
-                    padding = [imgs[0]] * (horizon - len(imgs))
-                    imgs = padding + imgs
-                # Process images: Normalize and transpose
-                imgs = np.stack([
-                    np.transpose(img.astype(np.float32) / 255.0, (2, 0, 1))
-                    for img in imgs
-                ], axis=0)
-                obs_dict[key] = imgs
-            elif key in episode_data:
-                data = episode_data[key][start_idx:end_idx]
-                # Pad if necessary
-                if data.shape[0] < horizon:
-                    padding = np.repeat(data[0:1], horizon - data.shape[0], axis=0)
-                    data = np.concatenate([padding, data], axis=0)
-                # Check if the key contains '_rot_axis_angle'
-                if '_rot_axis_angle' in key:
-                    # Convert axis-angle to 6D rotation representation
-                    rotvec = data
-                    rot_mats = st.Rotation.from_rotvec(rotvec).as_matrix()
-                    rot6d = mat_to_rot6d(rot_mats)
-                    obs_dict[key] = rot6d
-                else:
-                    obs_dict[key] = data
-            elif key == f'{robot_name}_eef_pos_wrt_start' or key == f'{robot_name}_eef_rot_axis_angle_wrt_start':
-                # Compute pose relative to start pose
-                curr_pos = episode_data[f'{robot_name}_eef_pos'][start_idx:end_idx]
-                curr_rotvec = episode_data[f'{robot_name}_eef_rot_axis_angle'][start_idx:end_idx]
-                # Pad if necessary
-                if curr_pos.shape[0] < horizon:
-                    padding_pos = np.repeat(curr_pos[0:1], horizon - curr_pos.shape[0], axis=0)
-                    curr_pos = np.concatenate([padding_pos, curr_pos], axis=0)
-                    padding_rotvec = np.repeat(curr_rotvec[0:1], horizon - curr_rotvec.shape[0], axis=0)
-                    curr_rotvec = np.concatenate([padding_rotvec, curr_rotvec], axis=0)
-                curr_pose = np.concatenate([curr_pos, curr_rotvec], axis=-1)
-                curr_pose_mat = pose_to_mat(curr_pose)
-                # Repeat start_pose_mat to match the horizon length
-                base_pose_mat = np.repeat(start_pose_mat[np.newaxis, :, :], horizon, axis=0)
-                rel_pose_mat = convert_pose_mat_rep(
-                    curr_pose_mat,
-                    base_pose_mat=base_pose_mat,
-                    pose_rep='relative',
-                    backward=False
-                )
-                rel_pose = mat_to_pose(rel_pose_mat)
-                if key == f'{robot_name}_eef_pos_wrt_start':
-                    obs_dict[key] = rel_pose[..., :3]
-                else:  # key == f'{robot_name}_eef_rot_axis_angle_wrt_start'
-                    # Convert rotation to 6D representation
-                    rotvec = rel_pose[..., 3:]
-                    rot_mats = st.Rotation.from_rotvec(rotvec).as_matrix()
-                    rot6d = mat_to_rot6d(rot_mats)
-                    obs_dict[key] = rot6d
-            else:
-                # Handle other cases as needed
-                pass
+                obs_dict[key] = data
+        elif key == f'{robot_name}_eef_pos_wrt_start' or key == f'{robot_name}_eef_rot_axis_angle_wrt_start':
+            curr_pos = episode_data[f'{robot_name}_eef_pos'][start_idx:end_idx]
+            curr_rotvec = episode_data[f'{robot_name}_eef_rot_axis_angle'][start_idx:end_idx]
+
+            curr_pose = np.concatenate([curr_pos, curr_rotvec], axis=-1)
+            curr_pose_mat = pose_to_mat(curr_pose)
+
+            rel_pose_mat = convert_pose_mat_rep(
+                curr_pose_mat,
+                base_pose_mat=start_pose_mat,
+                pose_rep='relative',
+                backward=False
+            )
+            rel_pose = mat_to_pose(rel_pose_mat)
+
+            # Pad if necessary
+            if rel_pose.shape[0] < horizon:
+                padding = np.repeat(rel_pose[:1], horizon - rel_pose.shape[0], axis=0)
+                rel_pose = np.concatenate([padding, rel_pose], axis=0)
+
+            if key == f'{robot_name}_eef_pos_wrt_start':
+                obs_dict[key] = rel_pose[..., :3]
+            else:  # key == f'{robot_name}_eef_rot_axis_angle_wrt_start'
+                # Convert rotation to 6D representation
+                rotvec = rel_pose[..., 3:]
+                rot_mats = st.Rotation.from_rotvec(rotvec).as_matrix()
+                rot6d = mat_to_rot6d(rot_mats)
+                obs_dict[key] = rot6d
     return obs_dict
 
 def process_policy_output(raw_action_t, action_pose_repr, episode_data, step_idx, robot_name):
