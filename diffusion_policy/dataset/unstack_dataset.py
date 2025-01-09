@@ -131,14 +131,6 @@ class UnstackDataset(BaseDataset):
         for key in lowdim_keys:
             if not 'wrt' in key:
                 self.sampler_lowdim_keys.append(key)
-    
-        for key in replay_buffer.keys():
-            if key.endswith('_demo_start_pose') or key.endswith('_demo_end_pose'):
-                self.sampler_lowdim_keys.append(key)
-                query_key = key.split('_')[0] + '_eef_pos'
-                key_horizon[key] = shape_meta['obs'][query_key]['horizon']
-                key_latency_steps[key] = shape_meta['obs'][query_key]['latency_steps']
-                key_down_sample_steps[key] = shape_meta['obs'][query_key]['down_sample_steps']
 
         sampler = SequenceSampler(
             shape_meta=shape_meta,
@@ -266,39 +258,9 @@ class UnstackDataset(BaseDataset):
         for key in self.sampler_lowdim_keys:
             obs_dict[key] = data[key].astype(np.float32)
             del data[key]
-        
-        # generate relative pose between two ees
-        for robot_id in range(self.num_robot):
-            # convert pose to mat
-            pose_mat = pose_to_mat(np.concatenate([
-                obs_dict[f'robot{robot_id}_eef_pos'],
-                obs_dict[f'robot{robot_id}_eef_rot_axis_angle']
-            ], axis=-1))
-            for other_robot_id in range(self.num_robot):
-                if robot_id == other_robot_id:
-                    continue
-                if not f'robot{robot_id}_eef_pos_wrt{other_robot_id}' in self.lowdim_keys:
-                    continue
-                other_pose_mat = pose_to_mat(np.concatenate([
-                    obs_dict[f'robot{other_robot_id}_eef_pos'],
-                    obs_dict[f'robot{other_robot_id}_eef_rot_axis_angle']
-                ], axis=-1))
-                rel_obs_pose_mat = convert_pose_mat_rep(
-                    pose_mat,
-                    base_pose_mat=other_pose_mat[-1],
-                    pose_rep='relative',
-                    backward=False)
-                rel_obs_pose = mat_to_pose10d(rel_obs_pose_mat)
-                obs_dict[f'robot{robot_id}_eef_pos_wrt{other_robot_id}'] = rel_obs_pose[:,:3]
-                obs_dict[f'robot{robot_id}_eef_rot_axis_angle_wrt{other_robot_id}'] = rel_obs_pose[:,3:]
-                
+    
         # generate relative pose with respect to episode start
         for robot_id in range(self.num_robot):
-            # HACK: add noise to episode start pose
-            if (f'robot{other_robot_id}_eef_pos_wrt_start' not in self.shape_meta['obs']) and \
-                (f'robot{other_robot_id}_eef_rot_axis_angle_wrt_start' not in self.shape_meta['obs']):
-                continue
-            
             # convert pose to mat
             pose_mat = pose_to_mat(np.concatenate([
                 obs_dict[f'robot{robot_id}_eef_pos'],
