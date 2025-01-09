@@ -24,15 +24,7 @@ from diffusion_policy.common.replay_buffer import ReplayBuffer
 from diffusion_policy.codecs.imagecodecs_numcodecs import register_codecs, JpegXl
 register_codecs()
 
-from helper import interpolate_gripper_positions_and_rotations
-
-required_files = [
-    "rgb.mp4",
-    "depth.mp4",
-    "misc.json",
-    "rgb_stamps.json",
-    "gripper_poses.json"
-]
+from data_processing import get_episode_info
 
 datefmt = "%Y.%m.%d_%H_%M_%S"
 
@@ -74,36 +66,8 @@ def main(in_path, output, out_res, compression_level, num_workers):
         print(path)
         if path.is_file(): continue
 
-        # check whether all necessary files exist
-        if (not np.all([path.joinpath(fn).is_file() for fn in required_files])):
-            print(path, "is missing data")
-            continue
-
-        with open(path.joinpath("rgb_stamps.json"), "r") as f:
-            rgb_stamps = json.load(f)
-
-        with open(path.joinpath("misc.json"), "r") as f:
-            misc = json.load(f)
-            gripper_close_time = misc["gripper_close_time"]
-        
-        with open(path.joinpath("gripper_poses.json"), "r") as f:
-            raw = json.load(f)
-
-            ts = np.array([d[0] for d in raw])
-            eef_pos = np.array([d[2] for d in raw])
-            eef_rot = np.array([d[3] for d in raw])
-
-            eef_pos -= eef_pos[0,:]
-
-            # do the same for quaternions and gripper open
-            eef_pos, eef_rot = interpolate_gripper_positions_and_rotations(rgb_stamps, ts, eef_pos, eef_rot)
-
-        robot_name = 'robot0'
-        episode_data = dict()
-        
-        episode_data[robot_name + '_eef_pos'] = eef_pos.astype(np.float32)
-        episode_data[robot_name + '_eef_rot_axis_angle'] = st.Rotation.from_quat(eef_rot).as_rotvec().astype(np.float32)
-        episode_data[robot_name + '_gripper_open'] = np.expand_dims(np.array(rgb_stamps)<gripper_close_time, axis=-1).astype(np.uint8)
+        episode_info = get_episode_info(path)
+        episode_data, rgb_stamps = episode_info["episode_data"], episode_info["rgb_stamps"]
 
         out_replay_buffer.add_episode(data=episode_data, compressors=None)
         
